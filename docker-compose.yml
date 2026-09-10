@@ -1,0 +1,92 @@
+
+x-logging: &default-logging
+  driver: local
+  # Without explicit caps a single oversized entry (a dumped dataframe or plotly payload)
+  # can grow past what `docker logs` will read back, making the whole stream unfilterable.
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  backend:
+    # Prebuilt image from GHCR — no local compile on first run. Pin a release
+    # with IO_IMAGE_TAG=v1.0.0, or build from source with docker-compose.dev.yml
+    # (see CONTRIBUTING.md).
+    image: ghcr.io/alinshaikh/insight-orchestra-backend:${IO_IMAGE_TAG:-latest}
+    logging: *default-logging
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - USE_REDIS=true
+      - REDIS_URL=redis://redis:6379
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:8501,http://localhost:3000,http://127.0.0.1:8501,http://127.0.0.1:3000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/uploads:/home/appuser/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # A measured cold start was 64s — uvicorn binds the port immediately,
+      # then each worker imports pandas, statsmodels and the agent SDK. With
+      # the old 10s start_period a slower machine would be marked unhealthy
+      # while still legitimately booting, and the frontend below waits on
+      # this condition, so the whole stack would appear to hang.
+      start_period: 120s
+
+  frontend:
+    image: ghcr.io/alinshaikh/insight-orchestra-frontend:${IO_IMAGE_TAG:-latest}
+    logging: *default-logging
+    ports:
+      - "8501:8501"
+    environment:
+      - FRONTEND_PORT=8501
+      # The URL the *browser* uses to reach the backend — so it must be
+      # resolvable from wherever you open the UI, not from inside this
+      # container. Override it when the stack runs on a different machine
+      # than the one you browse from, e.g.
+      #   PUBLIC_API_URL=http://192.168.1.50:8000 docker compose up -d
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    logging: *default-logging
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  uploads:
+  ollama_data:
+  redis_data:
+
+networks:
+  default:
+    name: insight-orchestra-network

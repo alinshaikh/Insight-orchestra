@@ -1,0 +1,114 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "insight-orchestra"
+version = "1.0.0"
+description = "Open-source AI data analyst you can self-host — multi-agent pipeline, NL querying, your choice of LLM"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Insight Orchestra Contributors"}
+]
+keywords = ["data-analysis", "ai", "llm", "pandas", "plotly"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# Runtime dependencies. backend/requirements.txt carries the exact pins used to
+# build the Docker images and run CI; keep this list in step with it — minimum
+# versions here, exact pins there.
+dependencies = [
+    # Core
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "sse-starlette>=2.0.0",
+    "pandas>=2.1.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.0.0",
+    "python-multipart>=0.0.6",
+
+    # LLM & Agents
+    "openai>=1.14.0",
+    "anthropic>=0.39.0",
+    "google-adk>=0.1.0",
+
+    # Sandbox
+    "RestrictedPython>=7.0",
+
+    # Visualization
+    "plotly>=5.19.0",
+    "statsmodels>=0.14.0",
+
+    # Connectors
+    "psycopg2-binary>=2.9.9",
+    "pymysql>=1.1.0",
+    "duckdb>=0.10.0",
+
+    # Utilities
+    "requests>=2.31.0",
+    "jinja2>=3.1.0",
+    "redis>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+]
+
+[project.scripts]
+insight-orchestra = "insight_orchestra.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["insight_orchestra*", "backend*", "frontend*"]
+exclude = ["*tests*", "*.pyc", "__pycache__"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["venv", "venv_tests", ".venv", "__pycache__", "*.egg-info"]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501", # line too long
+    "B008", # do not perform function calls in argument defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/**" = ["B", "E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

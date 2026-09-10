@@ -1,0 +1,435 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Database, FileUp, Waypoints, PanelLeft, Download, Plus, Clock, Moon, Command, Share2, Sparkles, ShieldCheck, Loader2 } from "lucide-react";
+import { useTheme } from "@/lib/theme";
+import { useToast } from "@/lib/toast";
+import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import { ModelSwitcher } from "@/components/ui/ModelSwitcher";
+import { CostMeter } from "@/components/ui/CostMeter";
+import { ExportMenu } from "@/components/ui/ExportMenu";
+import { CommandPalette, Command as Cmd } from "@/components/ui/CommandPalette";
+import { FileUpload } from "@/components/upload/FileUpload";
+import { DatabaseConnect } from "@/components/upload/DatabaseConnect";
+import { DemoDatasetPicker } from "@/components/upload/DemoDatasetPicker";
+import { DatasetInfoPanel } from "@/components/upload/DatasetInfoPanel";
+import { Workspace } from "@/components/workspace/Workspace";
+import { HistoryDrawer } from "@/components/workspace/HistoryDrawer";
+import { api } from "@/lib/api";
+import { DemoDataset, ParseAssumptions } from "@/lib/types";
+import { exportReport, exportReportAsPdf } from "@/lib/exportReport";
+import {
+    listWorkspaces,
+    loadWorkspace,
+    deleteWorkspace as removeWorkspace,
+    saveWorkspace,
+    getLastWorkspaceId,
+    setLastWorkspaceId,
+    clearLastWorkspaceId,
+    type SavedState,
+    type WorkspaceMeta,
+} from "@/lib/workspaces";
+
+export interface DatasetInfo {
+    name: string;
+    type: "uploaded" | "demo" | "database";
+    rows: number | string;
+    columns: number | string;
+    description?: string;
+    use_cases?: string[];
+    assumptions?: ParseAssumptions;
+}
+
+const newId = () => crypto.randomUUID();
+
+function Logo({ size = 8 }: { size?: number }) {
+    return (
+        <div
+            className="grid place-items-center rounded-xl bg-accent text-accent-fg"
+            style={{ width: `${size * 4}px`, height: `${size * 4}px` }}
+        >
+            <Waypoints size={size * 2.2} />
+        </div>
+    );
+}
+
+export default function Home() {
+    const theme = useTheme();
+    const toast = useToast();
+
+    const [datasetId, setDatasetId] = useState<string | null>(null);
+    const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
+    // "demo" leads: a first-time visitor rarely has a CSV or database ready,
+    // so the fastest path to seeing the product work is the default tab.
+    const [uploadMode, setUploadMode] = useState<"demo" | "file" | "db">("demo");
+    const [availableDatasets, setAvailableDatasets] = useState<Record<string, DemoDataset> | null>(null);
+
+    const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+    const [restore, setRestore] = useState<SavedState | null>(null);
+    const [workspaces, setWorkspaces] = useState<WorkspaceMeta[]>([]);
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [paletteOpen, setPaletteOpen] = useState(false);
+    const [cost, setCost] = useState({ tokens: 0, cost: 0 });
+
+    const currentState = useRef<SavedState | null>(null);
+    const createdAt = useRef<number>(Date.now());
+
+    useEffect(() => {
+        api.listDemoDatasets()
+            .then((r) => setAvailableDatasets(r.datasets))
+            .catch((e) => console.error("Failed to load datasets:", e));
+
+        // Resume the last active workspace on load (e.g. after a refresh)
+        // instead of always dropping back to the landing/connect screen.
+        void listWorkspaces().then((list) => {
+            setWorkspaces(list);
+            const lastId = getLastWorkspaceId();
+            if (lastId && list.some((w) => w.id === lastId)) {
+                void reopen(lastId);
+            }
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const startWorkspace = (dataset: string, info: DatasetInfo) => {
+        const id = newId();
+        setDatasetId(dataset);
+        setDatasetInfo(info);
+        setWorkspaceId(id);
+        setLastWorkspaceId(id);
+        setRestore(null);
+        currentState.current = null;
+        createdAt.current = Date.now();
+        setCost({ tokens: 0, cost: 0 });
+    };
+
+    const describeAssumptions = (a?: ParseAssumptions): string | null => {
+        if (!a) return null;
+        const notes: string[] = [];
+        if (a.delimiter && a.delimiter !== ",") {
+            notes.push(`"${a.delimiter === "\t" ? "tab" : a.delimiter}" separator`);
+        }
+        if (a.encoding && !a.encoding.startsWith("utf-8")) notes.push(`${a.encoding} encoding`);
+        if (a.datetime_columns?.length) {
+            notes.push(
+                `${a.datetime_columns.length} date column${a.datetime_columns.length === 1 ? "" : "s"}`
+            );
+        }
+        return notes.length ? `Detected ${notes.join(", ")}` : null;
+    };
+
+    const handleUploadSuccess = (path: string, info: DatasetInfo) => {
+        const note = describeAssumptions(info.assumptions);
+        if (note) toast(note, "info");
+        startWorkspace(path, info);
+    };
+
+    const handleNew = () => {
+        setDatasetId(null);
+        setDatasetInfo(null);
+        setWorkspaceId(null);
+        setRestore(null);
+        currentState.current = null;
+        setHistoryOpen(false);
+        clearLastWorkspaceId();
+    };
+
+    const handleSwitchDataset = async (datasetId: string) => {
+        try {
+            const result = await api.loadDemoData(datasetId);
+            startWorkspace(result.dataset_id, {
+                name: result.dataset_name,
+                type: "demo",
+                rows: result.row_count,
+                columns: result.column_count,
+                description: result.description,
+                use_cases: result.use_cases,
+            });
+        } catch {
+            toast("Failed to load dataset", "error");
+        }
+    };
+
+    const onPersist = useCallback(
+        (state: SavedState) => {
+            if (!workspaceId) return;
+            currentState.current = state;
+            // createdAt.current is set by startWorkspace and restored by reopen,
+            // so it is correct for both new and reopened workspaces.
+            void saveWorkspace(
+                {
+                    id: workspaceId,
+                    datasetName: datasetInfo?.name ?? "Dataset",
+                    datasetId: datasetId ?? "",
+                    createdAt: createdAt.current,
+                },
+                state
+            ).then(() => listWorkspaces().then(setWorkspaces));
+        },
+        [workspaceId, datasetInfo, datasetId]
+    );
+
+    const reopen = async (id: string) => {
+        const record = await loadWorkspace(id);
+        if (!record) {
+            toast("Could not load that analysis", "error");
+            clearLastWorkspaceId(); // stale pointer — target no longer exists
+            return;
+        }
+        // Check the data is still there before restoring. Previously the
+        // charts came back from Redis and the workspace looked healthy, then
+        // the next question 404'd — the dataset had been written to /tmp and
+        // lost on a container recreate.
+        if (!record.datasetId) {
+            toast("This analysis predates dataset tracking — load the data again", "error");
+            clearLastWorkspaceId();
+            return;
+        }
+        try {
+            await api.getDataset(record.datasetId);
+        } catch {
+            toast(`The data behind "${record.datasetName}" is no longer available`, "error");
+            clearLastWorkspaceId();
+            return;
+        }
+
+        const shape = record.state.analysisResult?.cleaner.report.final_shape;
+        setDatasetId(record.datasetId);
+        setDatasetInfo({
+            name: record.datasetName,
+            type: "demo",
+            rows: shape ? shape[0] : "—",
+            columns: shape ? shape[1] : "—",
+        });
+        setWorkspaceId(record.id);
+        setLastWorkspaceId(record.id);
+        setRestore(record.state);
+        currentState.current = record.state;
+        createdAt.current = record.createdAt;
+        setHistoryOpen(false);
+    };
+
+    const handleDelete = (id: string) => {
+        void removeWorkspace(id).then(() => listWorkspaces().then(setWorkspaces));
+        if (id === workspaceId) handleNew();
+        else if (id === getLastWorkspaceId()) clearLastWorkspaceId();
+    };
+
+    const handleExport = useCallback(() => {
+        const st = currentState.current;
+        if (!st?.analysisResult) {
+            toast("Run an analysis first", "info");
+            return;
+        }
+        exportReport(datasetInfo?.name ?? "Dataset", st.analysisResult, st.results);
+        toast("Report downloaded", "success");
+    }, [datasetInfo, toast]);
+
+    const handleExportPdf = useCallback(() => {
+        const st = currentState.current;
+        if (!st?.analysisResult) {
+            toast("Run an analysis first", "info");
+            return;
+        }
+        exportReportAsPdf(datasetInfo?.name ?? "Dataset", st.analysisResult, st.results);
+        toast("Opened print preview — choose “Save as PDF”", "success");
+    }, [datasetInfo, toast]);
+
+    const handleShare = useCallback(async () => {
+        const st = currentState.current;
+        if (!st?.analysisResult || !workspaceId) {
+            toast("Run an analysis first", "info");
+            return;
+        }
+        try {
+            const payload = {
+                datasetName: datasetInfo?.name ?? "Dataset",
+                analysisResult: st.analysisResult,
+                results: st.results,
+            };
+            const { token } = await api.createShareLink(workspaceId, payload);
+            const url = `${window.location.origin}/shared/${token}`;
+            await navigator.clipboard.writeText(url);
+            toast("Share link copied to clipboard", "success");
+        } catch {
+            toast("Could not create share link", "error");
+        }
+    }, [datasetInfo, workspaceId, toast]);
+
+    // Command palette actions
+    const commands: Cmd[] = [
+        { id: "new", label: "New analysis", group: "actions", icon: Plus, run: handleNew },
+        { id: "history", label: "Open history", group: "actions", icon: Clock, run: () => setHistoryOpen(true) },
+        { id: "export", label: "Export report", group: "actions", icon: Download, run: handleExport },
+        { id: "share", label: "Copy share link", group: "actions", icon: Share2, run: handleShare },
+        { id: "theme", label: "Toggle dark / light", group: "actions", icon: Moon, run: theme.toggle },
+        ...Object.entries(availableDatasets ?? {}).map(([id, ds]) => ({
+            id: `ds-${id}`,
+            label: `Open dataset: ${ds.name}`,
+            group: "datasets",
+            icon: Database,
+            run: () => handleSwitchDataset(id),
+        })),
+    ];
+
+    return (
+        <>
+            <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={commands} />
+
+            {datasetId && workspaceId ? (
+                <main className="flex h-screen w-full flex-col bg-bg">
+                    <HistoryDrawer
+                        open={historyOpen}
+                        onClose={() => setHistoryOpen(false)}
+                        workspaces={workspaces}
+                        activeId={workspaceId}
+                        onOpen={reopen}
+                        onDelete={handleDelete}
+                        onNew={handleNew}
+                    />
+
+                    <header className="relative z-30 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-surface/80 px-3 backdrop-blur md:px-4">
+                        <div className="flex min-w-0 items-center gap-2">
+                            <button
+                                onClick={() => setHistoryOpen(true)}
+                                className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-border bg-surface text-muted transition-colors hover:text-fg"
+                                title="History"
+                            >
+                                <PanelLeft size={16} />
+                            </button>
+                            <Logo size={8} />
+                            <h1 className="hidden text-[15px] font-semibold tracking-tight text-fg sm:block">Insight Orchestra</h1>
+                        </div>
+
+                        <div className="flex min-w-0 items-center gap-1.5">
+                            <button
+                                onClick={() => setPaletteOpen(true)}
+                                className="hidden items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-2 text-xs text-faint transition-colors hover:text-fg lg:flex"
+                                title="Command palette"
+                            >
+                                <Command size={13} /> <kbd className="font-mono">⌘K</kbd>
+                            </button>
+                            <CostMeter tokens={cost.tokens} cost={cost.cost} />
+                            <ModelSwitcher />
+                            <button
+                                onClick={handleShare}
+                                className="grid h-9 w-9 place-items-center rounded-lg border border-border bg-surface text-muted transition-colors hover:text-fg"
+                                title="Share a read-only link"
+                            >
+                                <Share2 size={16} />
+                            </button>
+                            <ExportMenu sessionId={workspaceId} onReport={handleExport} onPdf={handleExportPdf} />
+                            <DatasetInfoPanel
+                                info={datasetInfo}
+                                onReset={handleNew}
+                                onSwitch={handleSwitchDataset}
+                                availableDatasets={availableDatasets}
+                            />
+                            <ThemeToggle />
+                        </div>
+                    </header>
+
+                    <Workspace
+                        key={workspaceId}
+                        workspaceId={workspaceId}
+                        datasetId={datasetId}
+                        datasetName={datasetInfo?.name ?? "Dataset"}
+                        restore={restore}
+                        onPersist={onPersist}
+                        onCost={(d) => setCost((c) => ({ tokens: c.tokens + d.tokens, cost: c.cost + d.cost }))}
+                    />
+                </main>
+            ) : (
+                <main className="relative flex min-h-screen items-center justify-center overflow-x-clip overflow-y-auto bg-bg p-4 py-10">
+                    <div className="absolute right-3 top-3 flex max-w-[calc(100%-1.5rem)] items-center gap-2 sm:right-4 sm:top-4">
+                        {workspaces.length > 0 && (
+                            <button
+                                onClick={() => setHistoryOpen(true)}
+                                className="flex min-w-0 shrink items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium text-muted transition-colors hover:text-fg"
+                            >
+                                <Clock size={14} className="shrink-0" /> <span className="min-w-0 truncate">History</span>
+                            </button>
+                        )}
+                        <ThemeToggle />
+                    </div>
+
+                    <HistoryDrawer
+                        open={historyOpen}
+                        onClose={() => setHistoryOpen(false)}
+                        workspaces={workspaces}
+                        activeId={null}
+                        onOpen={reopen}
+                        onDelete={handleDelete}
+                        onNew={() => setHistoryOpen(false)}
+                    />
+
+                    <div className="relative z-10 mx-auto w-full min-w-0 max-w-xl">
+                        <div className="mb-9 flex flex-col items-center text-center">
+                            <div className="mb-6">
+                                <Logo size={14} />
+                            </div>
+                            <h1 className="text-3xl font-bold tracking-tight text-fg">Insight Orchestra</h1>
+                            <p className="mt-3 max-w-sm text-sm leading-relaxed text-muted">
+                                Upload a CSV or connect a database. It gets cleaned, analysed and
+                                charted — then you can ask questions about it in plain English.
+                            </p>
+                            <div className="mt-4 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-surface-2 px-3 py-1.5 text-xs font-medium text-muted">
+                                <ShieldCheck size={13} className="shrink-0 text-accent" />
+                                {/* Bare text as a flex child won't wrap — same trap as the
+                                    tab labels below. min-w-0 lets it shrink instead of
+                                    forcing the whole hero column wider than the screen. */}
+                                <span className="min-w-0">Your data never leaves your machine</span>
+                            </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-border bg-surface shadow-[var(--shadow)]">
+                            <div className="flex overflow-hidden rounded-t-2xl border-b border-border">
+                                {([
+                                    { id: "demo", label: "Try a Demo", shortLabel: "Demo", Icon: Sparkles },
+                                    { id: "file", label: "Upload CSV", shortLabel: "Upload", Icon: FileUp },
+                                    { id: "db", label: "Connect Database", shortLabel: "Database", Icon: Database },
+                                ] as const).map(({ id, label, shortLabel, Icon }) => {
+                                    const active = uploadMode === id;
+                                    return (
+                                        <button
+                                            key={id}
+                                            onClick={() => setUploadMode(id)}
+                                            className={`flex flex-1 min-w-0 items-center justify-center gap-1.5 py-4 text-sm font-medium transition-colors ${
+                                                active
+                                                    ? "border-b-2 border-accent text-accent"
+                                                    : "border-b-2 border-transparent text-muted hover:text-fg"
+                                            }`}
+                                        >
+                                            <Icon size={16} className="shrink-0" />
+                                            <span className="hidden truncate sm:inline">{label}</span>
+                                            <span className="truncate sm:hidden">{shortLabel}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="p-6 sm:p-8">
+                                {uploadMode === "demo" ? (
+                                    availableDatasets ? (
+                                        <DemoDatasetPicker onUploadSuccess={handleUploadSuccess} datasets={availableDatasets} />
+                                    ) : (
+                                        <div className="flex items-center justify-center gap-2 py-10 text-sm text-faint">
+                                            <Loader2 size={15} className="animate-spin" /> Loading demo datasets…
+                                        </div>
+                                    )
+                                ) : uploadMode === "file" ? (
+                                    <FileUpload onUploadSuccess={handleUploadSuccess} />
+                                ) : (
+                                    <DatabaseConnect onDataReady={handleUploadSuccess} />
+                                )}
+                            </div>
+                        </div>
+                        <p className="mt-6 text-center text-xs text-faint">
+                            Press <kbd className="rounded border border-border px-1 font-mono">⌘K</kbd> anytime for the command palette
+                        </p>
+                    </div>
+                </main>
+            )}
+        </>
+    );
+}
