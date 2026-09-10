@@ -4,7 +4,7 @@ sse-starlette==3.4.5
 pandas==3.0.3
 python-multipart==0.0.32
 pydantic==2.13.4
-openai==2.44.0
+openai==3.8.0
 anthropic==0.116.0
 plotly==6.8.0
 google-adk==2.3.0
